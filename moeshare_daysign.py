@@ -172,13 +172,13 @@ def _get_current_mb_and_activity(client: httpx.Client, _request_context_manager)
     return mb_value, activity_value
 
 
-def _check_punch_button_status(client: httpx.Client, _request_context_manager) -> bool:
+def _get_punch_button_element(client: httpx.Client, _request_context_manager):
     """
-    访问个人中心页面，检查每日打卡按钮是否可用。
-    返回 True 如果按钮可用（没有disabled属性），False 如果按钮禁用。
+    访问个人中心页面，返回每日打卡按钮元素。
+    如果找到按钮，返回按钮元素；否则返回 None。
     """
     user_page_url = f'https://{Moeshare_HOST}/u.php'
-    print(f"检查每日打卡按钮状态，访问页面: {user_page_url}")
+    print(f"尝试访问个人中心页面: {user_page_url} 查找每日打卡按钮...")
     try:
         with _request_context_manager('GET', user_page_url) as response:
             if response.status_code == 200:
@@ -186,29 +186,25 @@ def _check_punch_button_status(client: httpx.Client, _request_context_manager) -
                 punch_button = soup.find('button', type='button', string='每日打卡')
 
                 if punch_button:
-                    if 'disabled' in punch_button.attrs:
-                        print("❌ '每日打卡' 按钮已禁用，今天可能已打卡或无法打卡。")
-                        return False
-                    else:
-                        print("✅ '每日打卡' 按钮可用。")
-                        return True
+                    print("✅ 找到 '每日打卡' 按钮。")
+                    return punch_button
                 else:
-                    print("⚠️ 未找到 '每日打卡' 按钮。请检查页面结构。")
+                    print("❌ 未找到 '每日打卡' 按钮。可能未登录或页面结构有变。")
                     info_box = soup.find('div', class_='infoBox')
                     if info_box:
                         print(f"调试信息：在 infoBox 中未找到按钮。infoBox 内容前200字：\n{info_box.prettify()[:500]}...")
-                    return False
+                    return None
             else:
-                print(f"❌ 访问个人中心页面检查打卡按钮失败，状态码: {response.status_code}")
-                return False
+                print(f"❌ 访问个人中心页面失败，状态码: {response.status_code}")
+                return None
     except httpx.RequestError as exc:
-        print(f"❌ 检查打卡按钮状态时发生请求错误: {exc}")
+        print(f"❌ 访问个人中心页面时发生请求错误: {exc}")
         traceback.print_exc()
-        return False
+        return None
     except Exception as e:
-        print(f"❌ 检查打卡按钮状态过程中发生未知错误: {e}")
+        print(f"❌ 查找打卡按钮过程中发生未知错误: {e}")
         traceback.print_exc()
-        return False
+        return None
 
 
 def _perform_daily_punch(client: httpx.Client, _request_context_manager) -> bool:
@@ -381,17 +377,9 @@ def _auto_reply(client: httpx.Client, _request_context_manager, fid: int, tid: i
 
 def daysign(
         cookies: dict,
-        flaresolverr_url: str = None,
-        flaresolverr_proxy: str = None,
-        # 注意：FlareSolverrHTTPClient 并没有 proxy 参数，如果使用 FlareSolverr，proxy 是在 FlareSolverr 服务端配置的。这个参数在这里是冗余的。
 ) -> bool:
-    # 优先尝试使用 FlareSolverrHTTPClient，如果 flaresolverr_url 未提供，则回退到 httpx.Client
-    from flaresolverr import FlareSolverrHTTPClient  # 确保这里能够导入 FlareSolverrHTTPClient
-    with (FlareSolverrHTTPClient(
-            url=flaresolverr_url,
-            cookies=cookies,
-            http2=True)
-    if flaresolverr_url else httpx.Client(cookies=cookies, http2=True)) as client:
+    # 直接使用 httpx.Client
+    with httpx.Client(cookies=cookies, http2=True) as client:
 
         @contextmanager
         def _request(method, url, *args, **kwargs):
@@ -414,6 +402,7 @@ def daysign(
 
             response = client.request(method=method, url=url,
                                       headers=final_headers,
+                                      timeout=30,  # 增加一个更长的默认超时时间
                                       *args, **kwargs)
             try:
                 response.raise_for_status()
@@ -421,167 +410,101 @@ def daysign(
             finally:
                 response.close()
 
-        # 验证登录状态
-        login_check_url = f'https://{Moeshare_HOST}/u.php'
-        is_logged_in = False
-        print(f"尝试访问个人中心页面: {login_check_url} 进行登录状态验证...")
-        try:
-            with _request('GET', login_check_url) as response:
-                print(f"访问个人中心页面状态码: {response.status_code}")
-                if response.status_code == 200:
-                    soup = BeautifulSoup(response.text, 'html.parser')
-                    username_span = soup.find('span', class_='f16 lh_24 b s5 mr5')
-                    login_form = soup.find('form', {'action': 'member.php?mod=logging&action=login'})
-                    logout_link = soup.find('a', href=re.compile(r'login\.php\?action=quit'))
-
-                    if username_span and username_span.text.strip() and logout_link:
-                        print(f"✅ 检测到用户名 '{username_span.text.strip()}' 和 '退出' 链接。初步判断已登录。")
-                        is_logged_in = True
-                    elif login_form:
-                        print("❌ 检测到登录表单。判断为未登录。")
-                        is_logged_in = False
-                    else:
-                        print("⚠️ 未能明确判断登录状态。请检查 HTML 或调整选择器。")
-                        print("--- 响应 HTML 的前 500 个字符用于调试 ---")
-                        print(response.text[:500])
-                        print("----------------------------------------------------------")
-                        is_logged_in = False
-                else:
-                    print(f"❌ HTTP 状态码 {response.status_code} 不是 200。无法检查登录状态。")
-                    is_logged_in = False
-        except httpx.RequestError as exc:
-            print(f"❌ 访问 {exc.request.url} 时发生请求错误: {exc}")
-            is_logged_in = False
-        except Exception as e:
-            print(f"❌ 登录状态验证过程中发生未知错误: {e}")
-            traceback.print_exc()
-            is_logged_in = False
-
-        # 在这里执行登录失败的通知
-        if not is_logged_in:
-            error_msg = "❗ 登录状态验证失败：用户未登录或状态不明确。请确保你的 Cookie 有效，并从登录会话中准确提取。"
+        # 登录状态验证：尝试获取打卡按钮，如果失败（None），则视为未登录
+        punch_button_element = _get_punch_button_element(client, _request)
+        if punch_button_element is None:
+            error_msg = "❗ 登录状态验证失败：未找到 '每日打卡' 按钮。请确保你的 Cookie 有效，并从登录会话中准确提取。"
             print(error_msg)
             push_notification("萌享社签到通知", f"登录失败！请检查 Cookie。\n{error_msg}")
-            mb_final, activity_final = _get_current_mb_and_activity(client, _request)
             print(f"\n--- 脚本执行结束 ---")
-            print(f"最终 MB: {mb_final}，最终活跃度: {activity_final}")
-            return False
+            return False  # 登录失败，直接退出
 
-        # 获取可用帖子列表，即使后续不发帖，也先尝试获取
-        available_tids = _get_tids_from_forum(client, _request, FID)
-        if not available_tids:
-            warning_msg = "❌ 未能获取到可回复的帖子列表。可能无法进行任何回复。"
-            print(warning_msg)
-            push_notification("萌享社签到通知", f"未能获取到帖子列表。\n{warning_msg}")
+        # 此时已经确认登录成功（因为找到了打卡按钮）
+        # 检查打卡按钮是否禁用 (即是否已经打卡)
+        is_punch_button_enabled = 'disabled' not in punch_button_element.attrs
 
-        # --- 新增：强制至少一次回复 ---
-        reply_attempts = 0
-        current_mb, current_activity = _get_current_mb_and_activity(client, _request)
-        if available_tids:
-            print("\n--- 强制执行至少一次随机回复 ---")
-            target_tid = random.choice(available_tids)
-            available_tids.remove(target_tid)
-            reply_content = random.choice(list(AUTO_REPLIES_ORIGINAL))
-            if _auto_reply(client, _request, FID, target_tid, reply_content):
-                reply_attempts += 1
-                print(f"✅ 成功执行了首次强制回复。")
-                time.sleep(5)
-            else:
-                print(f"❌ 首次强制回复失败。")
-                push_notification("萌享社签到通知", f"首次强制回复失败。")  # 首次回复失败也通知
-            current_mb, current_activity = _get_current_mb_and_activity(client, _request)
-            print(f"首次回复后，当前 MB: {current_mb}，当前活跃度: {current_activity}")
-        else:
-            print("⚠️ 没有可用的帖子，无法执行首次强制回复。")
-            current_mb, current_activity = _get_current_mb_and_activity(client, _request)
-        # --- 强制回复结束 ---
+        current_mb, current_activity = _get_current_mb_and_activity(client, _request)  # 先获取当前状态
 
-        # --- 检查打卡按钮状态 (在强制回复之后) ---
-        is_punch_button_enabled = _check_punch_button_status(client, _request)
         if not is_punch_button_enabled:
-            status_msg = "❗ '每日打卡' 按钮已禁用。根据你的要求，停止进一步发帖。"
+            print("❌ '每日打卡' 按钮已禁用，今天可能已打卡或无法打卡。")
+            status_msg = "❗ '每日打卡' 按钮已禁用。跳过活跃度任务。"
             print(status_msg)
-            # 这里的通知可以更具体，例如报告当前的活跃度
             push_notification("萌享社签到通知",
                               f"每日打卡按钮已禁用。\n当前 MB: {current_mb}，活跃度: {current_activity}")
-            mb_final, activity_final = _get_current_mb_and_activity(client, _request)
+            mb_final, activity_final = _get_current_mb_and_activity(client, _request)  # 再次获取最终状态，确保最新
             print(f"\n--- 脚本执行结束 ---")
             print(f"最终 MB: {mb_final}，最终活跃度: {activity_final}")
             return True  # 视为成功完成流程，只是因为打卡按钮禁用而提前结束
-        # --- 检查结束 ---
 
-        # 活跃度检查和循环发帖逻辑
-        while current_activity < TARGET_ACTIVITY and reply_attempts < MAX_REPLY_ATTEMPTS:
-            print(f"\n--- 活跃度 {current_activity}/{TARGET_ACTIVITY} - 正在进行第 {reply_attempts + 1} 次回帖尝试 ---")
-
+        # 只有在打卡按钮可用且活跃度未达标时才执行回复任务
+        if current_activity < TARGET_ACTIVITY:
+            print(f"\n--- 活跃度 {current_activity}/{TARGET_ACTIVITY} 未达标，开始执行回复任务以增加活跃度 ---")
+            available_tids = _get_tids_from_forum(client, _request, FID)
             if not available_tids:
-                print("⚠️ 没有更多帖子可回复了，且活跃度未达标。请尝试刷新帖子列表或检查版块。")
-                push_notification("萌享社签到通知", f"回帖失败：没有更多帖子可回复。当前活跃度: {current_activity}")
-                break
+                warning_msg = "❌ 未能获取到可回复的帖子列表。可能无法进行任何回复。"
+                print(warning_msg)
+                push_notification("萌享社签到通知", f"未能获取到帖子列表。\n{warning_msg}")
 
-            available_replies = list(AUTO_REPLIES_ORIGINAL)
+            reply_attempts = 0
+            while current_activity < TARGET_ACTIVITY and reply_attempts < MAX_REPLY_ATTEMPTS:
+                print(
+                    f"\n--- 活跃度 {current_activity}/{TARGET_ACTIVITY} - 正在进行第 {reply_attempts + 1} 次回帖尝试 ---")
 
-            target_tid = random.choice(available_tids)
-            try:
-                available_tids.remove(target_tid)
-            except ValueError:
-                pass
+                if not available_tids:
+                    print("⚠️ 没有更多帖子可回复了，且活跃度未达标。请尝试刷新帖子列表或检查版块。")
+                    push_notification("萌享社签到通知", f"回帖失败：没有更多帖子可回复。当前活跃度: {current_activity}")
+                    break
 
-            reply_content = random.choice(available_replies)
-            try:
-                available_replies.remove(reply_content)
-            except ValueError:
-                pass
+                target_tid = random.choice(available_tids)
+                try:
+                    available_tids.remove(target_tid)  # 避免重复回复同一帖子
+                except ValueError:
+                    pass
 
-            print(f"选择帖子 ID: {target_tid} 进行回复。")
-            print(f"回复内容: '{reply_content}'")
+                reply_content = random.choice(list(AUTO_REPLIES_ORIGINAL))
+                # 注意：这里不需要从 AUTO_REPLIES_ORIGINAL 中移除，因为回复内容可以重复
 
-            try:
-                auto_reply_success = _auto_reply(client, _request, FID, target_tid, reply_content)
-                reply_attempts += 1
+                print(f"选择帖子 ID: {target_tid} 进行回复。")
+                print(f"回复内容: '{reply_content}'")
 
-                if auto_reply_success:
-                    print(f"✅ 回复成功！等待更新活跃度...")
-                    time.sleep(5)
-                    current_mb, current_activity = _get_current_mb_and_activity(client, _request)
-                    if current_activity >= TARGET_ACTIVITY:
-                        print(f"🎉 活跃度已达到目标 {TARGET_ACTIVITY}！")
-                        push_notification("萌享社签到通知",
-                                          f"活跃度已达标！当前 MB: {current_mb}，活跃度: {current_activity}")
-                        break
-                else:
-                    print(f"❌ 本次回帖失败。")
-                    push_notification("萌享社签到通知", f"第 {reply_attempts} 次回帖失败。")
+                try:
+                    auto_reply_success = _auto_reply(client, _request, FID, target_tid, reply_content)
+                    reply_attempts += 1
 
-            except Exception as e:
-                print(f"❌ 回帖过程中发生错误: {e}")
-                traceback.print_exc()
-                push_notification("萌享社签到通知", f"回帖过程中发生错误: {e}")
+                    if auto_reply_success:
+                        print(f"✅ 回复成功！等待更新活跃度...")
+                        time.sleep(5)  # 稍微等待，让服务器更新活跃度
+                        current_mb, current_activity = _get_current_mb_and_activity(client, _request)
+                        if current_activity >= TARGET_ACTIVITY:
+                            print(f"🎉 活跃度已达到目标 {TARGET_ACTIVITY}！")
+                            push_notification("萌享社签到通知",
+                                              f"活跃度已达标！当前 MB: {current_mb}，活跃度: {current_activity}")
+                            break
+                    else:
+                        print(f"❌ 本次回帖失败。")
+                        push_notification("萌享社签到通知", f"第 {reply_attempts} 次回帖失败。")
 
-            if current_activity < TARGET_ACTIVITY and reply_attempts < MAX_REPLY_ATTEMPTS:
-                sleep_time = random.randint(40, 60)
-                print(f"等待 {sleep_time} 秒后进行下一次回帖尝试...")
-                time.sleep(sleep_time)
+                except Exception as e:
+                    print(f"❌ 回帖过程中发生错误: {e}")
+                    traceback.print_exc()
+                    push_notification("萌享社签到通知", f"回帖过程中发生错误: {e}")
 
-        print("--- 回帖循环结束 ---")
+                if current_activity < TARGET_ACTIVITY and reply_attempts < MAX_REPLY_ATTEMPTS:
+                    sleep_time = random.randint(40, 60)
+                    print(f"等待 {sleep_time} 秒后进行下一次回帖尝试...")
+                    time.sleep(sleep_time)
 
-        # 如果活跃度未达标，但打卡按钮是可用的，则尝试打卡一次
-        if current_activity < TARGET_ACTIVITY and is_punch_button_enabled:
-            print("活跃度未完全达标，但打卡按钮可用，尝试执行每日打卡。")
-            punch_success = _perform_daily_punch(client, _request)
-            if punch_success:
-                push_notification("萌享社签到通知", f"活跃度未达标但打卡成功！")
-            else:
-                push_notification("萌享社签到通知", f"活跃度未达标且打卡失败。")
-        elif is_punch_button_enabled:
-            print("活跃度已达标，准备执行每日打卡。")
-            punch_success = _perform_daily_punch(client, _request)
-            if punch_success:
-                push_notification("萌享社签到通知", f"活跃度已达标，每日打卡成功！")
-            else:
-                push_notification("萌享社签到通知", f"活跃度已达标但每日打卡失败。")
+            print("--- 回帖循环结束 ---")
         else:
-            print("打卡按钮已禁用，跳过打卡。")
+            print(f"🎉 当前活跃度 {current_activity} 已达到或超过目标 {TARGET_ACTIVITY}。跳过回复任务。")
+
+        # 无论是否进行回复任务，只要打卡按钮可用，最后都要执行每日打卡
+        print("准备执行每日打卡。")
+        punch_success = _perform_daily_punch(client, _request)
+        if punch_success:
+            push_notification("萌享社签到通知", f"每日打卡成功！")
+        else:
+            push_notification("萌享社签到通知", f"每日打卡失败。")
 
         # --- 最终报告 MB 和活跃度 ---
         mb_final, activity_final = _get_current_mb_and_activity(client, _request)
@@ -594,7 +517,6 @@ def daysign(
 
 
 def retrieve_cookies_from_fetch(env: str) -> dict:
-    from flaresolverr import FlareSolverrHTTPClient  # 确保导入
     def parse_fetch(s: str) -> dict:
         ans = {}
         exec(s, {
@@ -632,7 +554,7 @@ def main():
                 cookies = retrieve_cookies_from_fetch(env_name)
                 print("--- 成功从环境变量解析出 Cookie ---")
                 print("正在尝试执行签到和自动回帖流程...")
-                script_successful = daysign(cookies=cookies, flaresolverr_url=os.getenv('FLARESOLVERR_URL'))
+                script_successful = daysign(cookies=cookies)
 
             except Exception as e:
                 error_msg = f"ERROR: 在 main 函数中处理 {env_name} 环境变量或执行 daysign 时发生错误: {e}"
